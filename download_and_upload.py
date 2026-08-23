@@ -98,17 +98,8 @@ def fetch_direct_mp4_playlist():
 
 def download_file(url, output_path):
     print(f"Downloading direct MP4: {url}")
-    cmd = [
-        "aria2c", "-x", "16", "-s", "16", "-k", "1M",
-        "-o", os.path.basename(output_path),
-        "-d", os.path.dirname(output_path),
-        url
-    ]
+    cmd = ["curl", "-L", "-C", "-", "-o", output_path, url]
     res = subprocess.run(cmd)
-    if res.returncode != 0:
-        print("[FALLBACK] Using curl for download...")
-        cmd_curl = ["curl", "-L", "-C", "-", "-o", output_path, url]
-        res = subprocess.run(cmd_curl)
     return res.returncode == 0
 
 def upload_week_to_gdrive(local_week_dir, remote_folder_name):
