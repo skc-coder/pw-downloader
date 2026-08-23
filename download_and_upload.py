@@ -96,6 +96,7 @@ def get_yt_url(page_url):
 def download_video(yt_url, output_path):
     cmd = [
         "yt-dlp",
+        "--js-runtimes", "node",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "-o", output_path,
         yt_url
@@ -122,7 +123,7 @@ def process_pipeline():
     all_items = fetch_playlist()
     print(f"Fetched {len(all_items)} total lecture metadata items.")
     
-    base_dir = os.path.abspath("downloads")
+    base_dir = "/mnt/storage/nptel_downloads"
     os.makedirs(base_dir, exist_ok=True)
     
     for w in WEEK_ORDER:
@@ -150,7 +151,7 @@ def process_pipeline():
             success = download_video(yt_url, output_file)
             if not success:
                 print(f"[RETRY] Attempting fallback download format for {item['title']}...")
-                cmd_fallback = ["yt-dlp", "-o", output_file, yt_url]
+                cmd_fallback = ["yt-dlp", "--js-runtimes", "node", "-o", output_file, yt_url]
                 subprocess.run(cmd_fallback)
         
         # After completing the week's download, start uploading to Google Drive
