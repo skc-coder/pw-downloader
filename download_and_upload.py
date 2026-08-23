@@ -25,6 +25,7 @@ WEEK_FOLDERS = {
 WEEK_ORDER = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2]
 
 GDRIVE_REMOTE_ROOT = "gdrive:NPTEL Modern C++"
+BASE_STORAGE_DIR = "/mnt/storage/nptel_downloads"
 
 def get_week_number(item_idx):
     if item_idx <= 66:
@@ -52,56 +53,62 @@ def parse_title(raw_title):
     clean_name = re.sub(r'-\s*-', '-', clean_name).strip()
     return clean_name
 
-def fetch_playlist():
+def fetch_titles_from_main_html():
     base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
     req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
     html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
     soup = BeautifulSoup(html, 'html.parser')
     
-    items = []
+    title_map = {}
     idx = 1
     for a in soup.find_all('a'):
         href = a.get('href', '')
         text = a.get_text(strip=True)
         if href.endswith('.html') and href.startswith('L'):
-            page_url = f"http://www.digimat.in/nptel/courses/video/106105234/{href}"
-            standard_title = parse_title(text)
-            week_num = get_week_number(idx)
-            items.append({
-                'idx': idx,
-                'raw_title': text,
-                'title': standard_title,
-                'page_url': page_url,
-                'week_num': week_num,
-                'week_folder': WEEK_FOLDERS[week_num]
-            })
+            title_map[idx] = parse_title(text)
             idx += 1
+    return title_map
+
+def fetch_direct_mp4_playlist():
+    base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
+    req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
+    html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    title_map = fetch_titles_from_main_html()
+    items = []
+    video_tags = soup.find_all('video')
+    
+    for idx, v in enumerate(video_tags, 1):
+        source = v.find('source')
+        mp4_url = source.get('src') if source else None
+        
+        standard_title = title_map.get(idx, f"L{idx} - Lecture {idx}")
+        week_num = get_week_number(idx)
+        
+        items.append({
+            'idx': idx,
+            'title': standard_title,
+            'mp4_url': mp4_url,
+            'week_num': week_num,
+            'week_folder': WEEK_FOLDERS[week_num]
+        })
+        
     return items
 
-def get_yt_url(page_url):
-    try:
-        req = urllib.request.Request(page_url, headers={'User-Agent': 'Mozilla/5.0'})
-        html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
-        soup = BeautifulSoup(html, 'html.parser')
-        iframe = soup.find('iframe', src=lambda s: s and 'youtube.com' in s)
-        if iframe:
-            src = iframe['src']
-            yt_id_match = re.search(r'embed/([a-zA-Z0-9_-]+)', src)
-            if yt_id_match:
-                return f"https://www.youtube.com/watch?v={yt_id_match.group(1)}"
-    except Exception as e:
-        print(f"Error fetching page {page_url}: {e}")
-    return None
-
-def download_video(yt_url, output_path):
+def download_file(url, output_path):
+    print(f"Downloading direct MP4: {url}")
     cmd = [
-        "yt-dlp",
-        "--js-runtimes", "node",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "-o", output_path,
-        yt_url
+        "aria2c", "-x", "16", "-s", "16", "-k", "1M",
+        "-o", os.path.basename(output_path),
+        "-d", os.path.dirname(output_path),
+        url
     ]
     res = subprocess.run(cmd)
+    if res.returncode != 0:
+        print("[FALLBACK] Using curl for download...")
+        cmd_curl = ["curl", "-L", "-C", "-", "-o", output_path, url]
+        res = subprocess.run(cmd_curl)
     return res.returncode == 0
 
 def upload_week_to_gdrive(local_week_dir, remote_folder_name):
@@ -120,15 +127,14 @@ def upload_week_to_gdrive(local_week_dir, remote_folder_name):
     return res.returncode == 0
 
 def process_pipeline():
-    all_items = fetch_playlist()
-    print(f"Fetched {len(all_items)} total lecture metadata items.")
+    all_items = fetch_direct_mp4_playlist()
+    print(f"Fetched {len(all_items)} total direct MP4 items.")
     
-    base_dir = "/mnt/storage/nptel_downloads"
-    os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(BASE_STORAGE_DIR, exist_ok=True)
     
     for w in WEEK_ORDER:
         folder_name = WEEK_FOLDERS[w]
-        local_week_dir = os.path.join(base_dir, folder_name)
+        local_week_dir = os.path.join(BASE_STORAGE_DIR, folder_name)
         os.makedirs(local_week_dir, exist_ok=True)
         
         week_items = [item for item in all_items if item['week_num'] == w]
@@ -139,27 +145,22 @@ def process_pipeline():
         for item in week_items:
             output_file = os.path.join(local_week_dir, f"{item['title']}.mp4")
             if os.path.exists(output_file) and os.path.getsize(output_file) > 1000000:
-                print(f"[EXISTS] {output_file} already downloaded. Skipping download.")
+                print(f"[EXISTS] {output_file} already downloaded. Skipping.")
                 continue
             
-            yt_url = get_yt_url(item['page_url'])
-            if not yt_url:
-                print(f"[ERROR] Could not extract YouTube URL for #{item['idx']}: {item['raw_title']}")
+            mp4_url = item['mp4_url']
+            if not mp4_url:
+                print(f"[ERROR] Could not extract direct MP4 URL for #{item['idx']}: {item['title']}")
                 continue
             
-            print(f"\n--> Downloading #{item['idx']} [{item['title']}] from {yt_url}")
-            success = download_video(yt_url, output_file)
-            if not success:
-                print(f"[RETRY] Attempting fallback download format for {item['title']}...")
-                cmd_fallback = ["yt-dlp", "--js-runtimes", "node", "-o", output_file, yt_url]
-                subprocess.run(cmd_fallback)
+            print(f"\n--> Downloading #{item['idx']} [{item['title']}]")
+            download_file(mp4_url, output_file)
         
-        # After completing the week's download, start uploading to Google Drive
         upload_success = upload_week_to_gdrive(local_week_dir, folder_name)
         if upload_success:
             print(f"[SUCCESS] Week {w} fully uploaded to Google Drive!")
         else:
-            print(f"[WARNING] Week {w} upload encountered issues. Will continue next week.")
+            print(f"[WARNING] Week {w} upload encountered issues.")
 
 if __name__ == '__main__':
     process_pipeline()
