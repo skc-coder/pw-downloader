@@ -96,11 +96,35 @@ def fetch_direct_mp4_playlist():
         
     return items
 
-def download_file(url, output_path):
-    print(f"Downloading direct MP4: {url}")
-    cmd = ["curl", "-L", "-C", "-", "-o", output_path, url]
-    res = subprocess.run(cmd)
-    return res.returncode == 0
+def download_and_boost_volume(url, final_output_path):
+    temp_raw_path = final_output_path + ".raw.mp4"
+    print(f"Downloading direct MP4 to temp location: {url}")
+    cmd_curl = ["curl", "-L", "-C", "-", "-o", temp_raw_path, url]
+    res = subprocess.run(cmd_curl)
+    if res.returncode != 0:
+        print("[ERROR] Failed to download MP4 via curl.")
+        return False
+    
+    print(f"Boosting volume (2.0x / +6dB) via ffmpeg...")
+    cmd_ffmpeg = [
+        "ffmpeg", "-y",
+        "-i", temp_raw_path,
+        "-c:v", "copy",
+        "-filter:a", "volume=2.0",
+        final_output_path
+    ]
+    res_ff = subprocess.run(cmd_ffmpeg)
+    
+    if res_ff.returncode == 0 and os.path.exists(final_output_path):
+        if os.path.exists(temp_raw_path):
+            os.remove(temp_raw_path)
+        return True
+    else:
+        print("[WARNING] ffmpeg volume boost failed, falling back to original audio video file...")
+        if os.path.exists(temp_raw_path):
+            os.rename(temp_raw_path, final_output_path)
+            return True
+        return False
 
 def upload_week_to_gdrive(local_week_dir, remote_folder_name):
     remote_target = f"{GDRIVE_REMOTE_ROOT}/{remote_folder_name}"
@@ -136,7 +160,7 @@ def process_pipeline():
         for item in week_items:
             output_file = os.path.join(local_week_dir, f"{item['title']}.mp4")
             if os.path.exists(output_file) and os.path.getsize(output_file) > 1000000:
-                print(f"[EXISTS] {output_file} already downloaded. Skipping.")
+                print(f"[EXISTS] {output_file} already downloaded and volume boosted. Skipping.")
                 continue
             
             mp4_url = item['mp4_url']
@@ -144,8 +168,8 @@ def process_pipeline():
                 print(f"[ERROR] Could not extract direct MP4 URL for #{item['idx']}: {item['title']}")
                 continue
             
-            print(f"\n--> Downloading #{item['idx']} [{item['title']}]")
-            download_file(mp4_url, output_file)
+            print(f"\n--> Downloading & Boosting Volume for #{item['idx']} [{item['title']}]")
+            download_and_boost_volume(mp4_url, output_file)
         
         upload_success = upload_week_to_gdrive(local_week_dir, folder_name)
         if upload_success:
