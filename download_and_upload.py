@@ -114,6 +114,30 @@ def process_pipeline():
     
     os.makedirs(base_dir, exist_ok=True)
     
+    # 1. INITIAL PASS: Upload and delete any files already sitting in downloads/
+    print("\n==========================================")
+    print("SCANNING FOR EXISTING LOCAL DOWNLOADS TO UPLOAD & CLEAN UP FIRST")
+    print("==========================================")
+    for root, dirs, files in os.walk(base_dir):
+        for fname in files:
+            if fname.endswith(".mp4") and not fname.endswith(".raw.mp4"):
+                local_filepath = os.path.join(root, fname)
+                if os.path.getsize(local_filepath) > 1000000:
+                    folder_name = os.path.basename(root)
+                    print(f"\n[FOUND EXISTING FILE] {fname} in folder '{folder_name}'")
+                    if do_upload:
+                        upload_success = upload_single_file(local_filepath, folder_name, gdrive_root)
+                        if upload_success:
+                            print(f"[SUCCESS] Uploaded pre-existing file: {fname}")
+                            if delete_after_upload and os.path.exists(local_filepath):
+                                os.remove(local_filepath)
+                                print(f"[CLEANUP] Deleted local file to free disk space: {fname}")
+                        else:
+                            print(f"[WARNING] Failed to upload pre-existing file: {fname}")
+
+    print("\n==========================================")
+    print("STARTING MAIN STREAMING PIPELINE (DOWNLOAD -> UPLOAD -> DELETE)")
+    print("==========================================")
     for w in week_order:
         if w not in WEEK_FOLDERS:
             continue
