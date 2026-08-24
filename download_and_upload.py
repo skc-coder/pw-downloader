@@ -85,7 +85,6 @@ def fetch_playlist_items():
 def download_file(url, target_path, retries=5):
     for attempt in range(1, retries + 1):
         print(f"[DOWNLOADING] {os.path.basename(target_path)} (Attempt {attempt}/{retries})")
-        # Increase speed with high-speed curl parameters
         cmd_curl = [
             "curl", "-s", "-L", "-C", "-",
             "--connect-timeout", "15",
@@ -120,9 +119,10 @@ def process_pipeline():
     do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=True)
     delete_after_upload = config.getboolean("GENERAL", "delete_after_upload", fallback=True)
     
-    num_download_workers = config.getint("GENERAL", "download_workers", fallback=2)
-    num_upload_workers = config.getint("GENERAL", "upload_workers", fallback=3)
-    
+    num_download_workers = config.getint("GENERAL", "download_workers", fallback=1)
+    num_upload_workers = config.getint("GENERAL", "upload_workers", fallback=2)
+    max_queue_size = 3  # Never allow more than 3 downloaded files to pile up in RAM/Disk
+
     raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
     week_order = [int(w.strip()) for w in raw_week_order.split(",") if w.strip().isdigit()]
 
@@ -130,17 +130,15 @@ def process_pipeline():
     print(f"Fetched {len(all_items)} total direct MP4 items.")
     os.makedirs(base_dir, exist_ok=True)
 
-    # 1. PHASE 1: UPLOAD AND DELETE ALL EXISTING DOWNLOADED FILES FIRST
+    # 1. PHASE 1: UPLOAD AND DELETE ALL PRE-EXISTING LOCAL FILES FIRST
     print("\n==========================================")
     print("PHASE 1: UPLOADING AND DELETING ALL PRE-EXISTING LOCAL FILES FIRST")
     print("==========================================")
-    existing_files_found = False
     for root, dirs, files in os.walk(base_dir):
         for fname in sorted(files):
             if fname.endswith(".mp4") and not fname.endswith(".raw.mp4"):
                 local_filepath = os.path.join(root, fname)
                 if os.path.getsize(local_filepath) > 1000000:
-                    existing_files_found = True
                     folder_name = os.path.basename(root)
                     print(f"\n[FOUND LOCAL FILE] {fname} in '{folder_name}'")
                     if do_upload:
@@ -150,19 +148,14 @@ def process_pipeline():
                             if delete_after_upload and os.path.exists(local_filepath):
                                 os.remove(local_filepath)
                                 print(f"[CLEANUP] Deleted local file: {fname}")
-                        else:
-                            print(f"[UPLOAD WARNING] Failed to upload {fname}")
 
-    if not existing_files_found:
-        print("No pre-existing local files to upload. Moving directly to Phase 2.")
-
-    # 2. PHASE 2: STREAM PIPELINE WITH INFINITE RETRY FOR FAILED DOWNLOADS
+    # 2. PHASE 2: STREAM PIPELINE WITH BOUNDED UPLOAD QUEUE & SPEED BACKPRESSURE
     print("\n==========================================")
-    print("PHASE 2: PRODUCER-CONSUMER CONCURRENT STREAMING PIPELINE")
+    print("PHASE 2: STREAMING PIPELINE WITH SPEED BACKPRESSURE CONTROL")
     print("==========================================")
 
     download_queue = queue.Queue()
-    upload_queue = queue.Queue()
+    upload_queue = queue.Queue(maxsize=max_queue_size)
     failed_items = []
     failed_lock = threading.Lock()
 
@@ -199,6 +192,7 @@ def process_pipeline():
                 if success:
                     print(f"[DOWNLOAD COMPLETE] #{item['idx']:02d} [{item['filename']}]")
                     if do_upload:
+                        # Put will block if upload_queue reaches maxsize (3 files), pausing download automatically
                         upload_queue.put((output_file, folder_name))
                 else:
                     print(f"[DOWNLOAD FAILED] #{item['idx']:02d} [{item['filename']}] - queued for retry pass.")
