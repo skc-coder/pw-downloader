@@ -2,13 +2,12 @@ import os
 import re
 import sys
 import time
+import shutil
 import subprocess
 import urllib.request
 import configparser
 from bs4 import BeautifulSoup
 
-# Define folders mapping matching Digimat 75-lecture curriculum structure:
-# Weeks 1 to 11 have 6 lectures each (75 - 66 = 9 for Week 12).
 WEEK_FOLDERS = {
     1: "Week1: Programming in C++ is Fun.",
     2: "Week2: C++ as Better C.",
@@ -38,8 +37,6 @@ def get_week_number(item_idx):
         return 12
 
 def parse_title(raw_title):
-    # Standardize titles for filenames
-    # Clean up slashes, colons, duplicate hyphens and spaces
     clean_name = raw_title.strip()
     clean_name = clean_name.replace('/', '-').replace(':', '-')
     clean_name = re.sub(r'\s+', ' ', clean_name)
@@ -52,7 +49,6 @@ def fetch_playlist_items():
     html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Map item index to cleaned title
     title_map = {}
     idx = 1
     for a in soup.find_all('a'):
@@ -71,8 +67,6 @@ def fetch_playlist_items():
         
         raw_title = title_map.get(idx, f"Lecture {idx}")
         week_num = get_week_number(idx)
-
-        # Accurate 2-digit zero-padded index (01 to 75)
         formatted_filename = f"{idx:02d} - {raw_title}.mp4"
         
         items.append({
@@ -86,24 +80,18 @@ def fetch_playlist_items():
         
     return items
 
-def download_video(url, final_output_path):
-    print(f"Downloading direct MP4: {url}")
-    cmd_curl = ["curl", "-L", "-C", "-", "-o", final_output_path, url]
+def download_file(url, target_path):
+    print(f"Downloading: {url}")
+    cmd_curl = ["curl", "-L", "-C", "-", "-o", target_path, url]
     res = subprocess.run(cmd_curl)
-    if res.returncode == 0 and os.path.exists(final_output_path):
-        return True
-    else:
-        print(f"[ERROR] Failed to download MP4 for {final_output_path}")
-        return False
+    return res.returncode == 0 and os.path.exists(target_path)
 
-def upload_week_to_gdrive(local_week_dir, remote_folder_name, gdrive_remote_root):
-    remote_target = f"{gdrive_remote_root}/{remote_folder_name}"
-    print(f"\n==========================================")
-    print(f"Uploading {local_week_dir} -> {remote_target}")
-    print(f"==========================================")
+def upload_single_file(local_path, remote_week_folder, gdrive_remote_root):
+    remote_target = f"{gdrive_remote_root}/{remote_week_folder}"
+    print(f"Uploading single file {os.path.basename(local_path)} -> {remote_target}")
     cmd = [
         "rclone", "copy",
-        local_week_dir,
+        local_path,
         remote_target,
         "--progress",
         "--stats", "5s"
@@ -115,7 +103,8 @@ def process_pipeline():
     config = load_config()
     base_dir = config.get("GENERAL", "base_storage_dir", fallback="./downloads")
     gdrive_root = config.get("GENERAL", "gdrive_remote_root", fallback="gdrive:NPTEL Modern C++")
-    do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=False)
+    do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=True)
+    delete_after_upload = config.getboolean("GENERAL", "delete_after_upload", fallback=True)
     
     raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
     week_order = [int(w.strip()) for w in raw_week_order.split(",") if w.strip().isdigit()]
@@ -139,24 +128,36 @@ def process_pipeline():
         
         for item in week_items:
             output_file = os.path.join(local_week_dir, item['filename'])
-            if os.path.exists(output_file) and os.path.getsize(output_file) > 1000000:
-                print(f"[EXISTS] {item['filename']} already processed. Skipping.")
-                continue
             
-            mp4_url = item['mp4_url']
-            if not mp4_url:
-                print(f"[ERROR] Could not extract direct MP4 URL for #{item['idx']}: {item['filename']}")
-                continue
-            
-            print(f"\n--> Processing #{item['idx']:02d} [{item['filename']}]")
-            download_video(mp4_url, output_file)
-        
-        if do_upload:
-            upload_success = upload_week_to_gdrive(local_week_dir, folder_name, gdrive_root)
-            if upload_success:
-                print(f"[SUCCESS] Week {w} fully uploaded to Google Drive!")
+            # Check if file already exists locally
+            if not (os.path.exists(output_file) and os.path.getsize(output_file) > 1000000):
+                mp4_url = item['mp4_url']
+                if not mp4_url:
+                    print(f"[ERROR] Missing URL for #{item['idx']}: {item['filename']}")
+                    continue
+                
+                print(f"\n--> Processing #{item['idx']:02d} [{item['filename']}]")
+                download_success = download_file(mp4_url, output_file)
+                if not download_success:
+                    print(f"[ERROR] Failed to download {item['filename']}")
+                    continue
             else:
-                print(f"[WARNING] Week {w} upload encountered issues.")
+                print(f"[EXISTS] {item['filename']} found locally.")
+            
+            # Immediate Upload & Cleanup per item
+            if do_upload:
+                upload_success = upload_single_file(output_file, folder_name, gdrive_root)
+                if upload_success:
+                    print(f"[SUCCESS] Uploaded {item['filename']} to Drive!")
+                    if delete_after_upload and os.path.exists(output_file):
+                        os.remove(output_file)
+                        print(f"[CLEANUP] Deleted local file: {item['filename']} to free disk space.")
+                else:
+                    print(f"[WARNING] Failed to upload {item['filename']} to Drive.")
+        
+        # Clean up empty week directory if all files deleted
+        if delete_after_upload and os.path.exists(local_week_dir) and not os.listdir(local_week_dir):
+            os.rmdir(local_week_dir)
 
 if __name__ == '__main__':
     process_pipeline()
