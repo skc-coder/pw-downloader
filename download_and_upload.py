@@ -2,7 +2,9 @@ import os
 import re
 import sys
 import time
+import queue
 import shutil
+import threading
 import subprocess
 import urllib.request
 import configparser
@@ -81,23 +83,20 @@ def fetch_playlist_items():
     return items
 
 def download_file(url, target_path):
-    print(f"Downloading: {url}")
-    cmd_curl = ["curl", "-L", "-C", "-", "-o", target_path, url]
+    print(f"[DOWNLOADING] {os.path.basename(target_path)}")
+    cmd_curl = ["curl", "-s", "-L", "-C", "-", "-o", target_path, url]
     res = subprocess.run(cmd_curl)
     return res.returncode == 0 and os.path.exists(target_path)
 
 def upload_single_file(local_path, remote_week_folder, gdrive_remote_root):
     remote_target = f"{gdrive_remote_root}/{remote_week_folder}"
-    print(f"Uploading single file {os.path.basename(local_path)} -> {remote_target}")
+    print(f"[UPLOADING] {os.path.basename(local_path)} -> {remote_target}")
     cmd = [
         "rclone", "copy",
         local_path,
         remote_target,
         "--drive-chunk-size", "64M",
-        "--transfers", "4",
-        "--drive-acknowledge-abuse",
-        "--progress",
-        "--stats", "2s"
+        "--stats", "0"
     ]
     res = subprocess.run(cmd)
     return res.returncode == 0
@@ -109,17 +108,24 @@ def process_pipeline():
     do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=True)
     delete_after_upload = config.getboolean("GENERAL", "delete_after_upload", fallback=True)
     
+    num_download_workers = config.getint("GENERAL", "download_workers", fallback=3)
+    num_upload_workers = config.getint("GENERAL", "upload_workers", fallback=5)
+    
     raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
     week_order = [int(w.strip()) for w in raw_week_order.split(",") if w.strip().isdigit()]
 
     all_items = fetch_playlist_items()
     print(f"Fetched {len(all_items)} total direct MP4 items.")
+    print(f"Concurrent Workers: {num_download_workers} Downloader Workers | {num_upload_workers} Uploader Workers")
     
     os.makedirs(base_dir, exist_ok=True)
-    
-    # 1. INITIAL PASS: Upload and delete any files already sitting in downloads/
+
+    download_queue = queue.Queue()
+    upload_queue = queue.Queue()
+
+    # 1. SCAN FOR EXISTING LOCAL DOWNLOADS TO UPLOAD FIRST
     print("\n==========================================")
-    print("SCANNING FOR EXISTING LOCAL DOWNLOADS TO UPLOAD & CLEAN UP FIRST")
+    print("SCANNING FOR EXISTING LOCAL DOWNLOADS TO UPLOAD FIRST")
     print("==========================================")
     for root, dirs, files in os.walk(base_dir):
         for fname in files:
@@ -127,20 +133,9 @@ def process_pipeline():
                 local_filepath = os.path.join(root, fname)
                 if os.path.getsize(local_filepath) > 1000000:
                     folder_name = os.path.basename(root)
-                    print(f"\n[FOUND EXISTING FILE] {fname} in folder '{folder_name}'")
-                    if do_upload:
-                        upload_success = upload_single_file(local_filepath, folder_name, gdrive_root)
-                        if upload_success:
-                            print(f"[SUCCESS] Uploaded pre-existing file: {fname}")
-                            if delete_after_upload and os.path.exists(local_filepath):
-                                os.remove(local_filepath)
-                                print(f"[CLEANUP] Deleted local file to free disk space: {fname}")
-                        else:
-                            print(f"[WARNING] Failed to upload pre-existing file: {fname}")
+                    upload_queue.put((local_filepath, folder_name))
 
-    print("\n==========================================")
-    print("STARTING MAIN STREAMING PIPELINE (DOWNLOAD -> UPLOAD -> DELETE)")
-    print("==========================================")
+    # Populate Download Queue based on week_order
     for w in week_order:
         if w not in WEEK_FOLDERS:
             continue
@@ -149,42 +144,82 @@ def process_pipeline():
         os.makedirs(local_week_dir, exist_ok=True)
         
         week_items = [item for item in all_items if item['week_num'] == w]
-        print(f"\n==========================================")
-        print(f"PROCESSING WEEK {w}: {folder_name} ({len(week_items)} items)")
-        print(f"==========================================")
-        
         for item in week_items:
             output_file = os.path.join(local_week_dir, item['filename'])
-            
-            # Check if file already exists locally
             if not (os.path.exists(output_file) and os.path.getsize(output_file) > 1000000):
-                mp4_url = item['mp4_url']
-                if not mp4_url:
-                    print(f"[ERROR] Missing URL for #{item['idx']}: {item['filename']}")
-                    continue
-                
-                print(f"\n--> Processing #{item['idx']:02d} [{item['filename']}]")
-                download_success = download_file(mp4_url, output_file)
-                if not download_success:
-                    print(f"[ERROR] Failed to download {item['filename']}")
-                    continue
-            else:
-                print(f"[EXISTS] {item['filename']} found locally.")
+                download_queue.put((item, output_file, folder_name))
+
+    # Downloader Worker Function
+    def download_worker():
+        while True:
+            try:
+                item, output_file, folder_name = download_queue.get_nowait()
+            except queue.Empty:
+                break
             
-            # Immediate Upload & Cleanup per item
-            if do_upload:
-                upload_success = upload_single_file(output_file, folder_name, gdrive_root)
-                if upload_success:
-                    print(f"[SUCCESS] Uploaded {item['filename']} to Drive!")
-                    if delete_after_upload and os.path.exists(output_file):
-                        os.remove(output_file)
-                        print(f"[CLEANUP] Deleted local file: {item['filename']} to free disk space.")
+            mp4_url = item['mp4_url']
+            if mp4_url:
+                success = download_file(mp4_url, output_file)
+                if success:
+                    print(f"[DOWNLOAD COMPLETE] #{item['idx']:02d} [{item['filename']}]")
+                    if do_upload:
+                        upload_queue.put((output_file, folder_name))
                 else:
-                    print(f"[WARNING] Failed to upload {item['filename']} to Drive.")
-        
-        # Clean up empty week directory if all files deleted
-        if delete_after_upload and os.path.exists(local_week_dir) and not os.listdir(local_week_dir):
-            os.rmdir(local_week_dir)
+                    print(f"[DOWNLOAD ERROR] Failed #{item['idx']:02d} [{item['filename']}]")
+            download_queue.task_done()
+
+    # Uploader Worker Function
+    def upload_worker():
+        while True:
+            try:
+                # Block briefly to wait for downloads to produce items
+                local_filepath, folder_name = upload_queue.get(timeout=3)
+            except queue.Empty:
+                if download_queue.empty() and active_downloads == 0:
+                    break
+                continue
+            
+            fname = os.path.basename(local_filepath)
+            upload_success = upload_single_file(local_filepath, folder_name, gdrive_root)
+            if upload_success:
+                print(f"[UPLOAD SUCCESS] {fname}")
+                if delete_after_upload and os.path.exists(local_filepath):
+                    os.remove(local_filepath)
+                    print(f"[CLEANUP] Deleted local file: {fname}")
+            else:
+                print(f"[UPLOAD WARNING] Failed to upload {fname}")
+            upload_queue.task_done()
+
+    print("\n==========================================")
+    print("STARTING PRODUCER-CONSUMER CONCURRENT PIPELINE")
+    print("==========================================")
+
+    # Launch Upload Workers
+    upload_threads = []
+    for _ in range(num_upload_workers):
+        t = threading.Thread(target=upload_worker)
+        t.daemon = True
+        t.start()
+        upload_threads.append(t)
+
+    # Launch Download Workers
+    download_threads = []
+    for _ in range(num_download_workers):
+        t = threading.Thread(target=download_worker)
+        t.start()
+        download_threads.append(t)
+
+    # Track active downloads
+    global active_downloads
+    active_downloads = len(download_threads)
+
+    for t in download_threads:
+        t.join()
+        active_downloads -= 1
+
+    download_queue.join()
+    upload_queue.join()
+    print("\n[COMPLETE] All downloads and uploads finished successfully!")
 
 if __name__ == '__main__':
     process_pipeline()
