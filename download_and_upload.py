@@ -103,14 +103,20 @@ def download_and_boost_volume(url, final_output_path):
         "-filter:a", "volume=2.0",
         final_output_path
     ]
-    res_ff = subprocess.run(cmd_ffmpeg)
-    
-    if res_ff.returncode == 0 and os.path.exists(final_output_path):
-        if os.path.exists(temp_raw_path):
-            os.remove(temp_raw_path)
-        return True
-    else:
-        print("[WARNING] ffmpeg volume boost failed, keeping original audio/video file...")
+    try:
+        res_ff = subprocess.run(cmd_ffmpeg)
+        if res_ff.returncode == 0 and os.path.exists(final_output_path):
+            if os.path.exists(temp_raw_path):
+                os.remove(temp_raw_path)
+            return True
+        else:
+            print("[WARNING] ffmpeg volume boost failed, keeping original audio/video file...")
+            if os.path.exists(temp_raw_path):
+                os.rename(temp_raw_path, final_output_path)
+                return True
+            return False
+    except FileNotFoundError:
+        print("[WARNING] ffmpeg binary not found on system path! Keeping original audio/video file without volume boost...")
         if os.path.exists(temp_raw_path):
             os.rename(temp_raw_path, final_output_path)
             return True
