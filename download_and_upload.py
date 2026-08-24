@@ -49,7 +49,7 @@ def fetch_playlist_items():
     base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
     req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
     html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
-    soup = BeautifulSoup(html, 'parser' if False else 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser')
     
     title_map = {}
     idx = 1
@@ -85,7 +85,15 @@ def fetch_playlist_items():
 def download_file(url, target_path, retries=5):
     for attempt in range(1, retries + 1):
         print(f"[DOWNLOADING] {os.path.basename(target_path)} (Attempt {attempt}/{retries})")
-        cmd_curl = ["curl", "-s", "-L", "-C", "-", "--retry", "5", "--retry-delay", "2", "-o", target_path, url]
+        # Increase speed with high-speed curl parameters
+        cmd_curl = [
+            "curl", "-s", "-L", "-C", "-",
+            "--connect-timeout", "15",
+            "--max-time", "300",
+            "--retry", "5",
+            "--retry-delay", "2",
+            "-o", target_path, url
+        ]
         res = subprocess.run(cmd_curl)
         if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 1000000:
             return True
@@ -112,7 +120,7 @@ def process_pipeline():
     do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=True)
     delete_after_upload = config.getboolean("GENERAL", "delete_after_upload", fallback=True)
     
-    num_download_workers = config.getint("GENERAL", "download_workers", fallback=3)
+    num_download_workers = config.getint("GENERAL", "download_workers", fallback=2)
     num_upload_workers = config.getint("GENERAL", "upload_workers", fallback=3)
     
     raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
@@ -120,18 +128,19 @@ def process_pipeline():
 
     all_items = fetch_playlist_items()
     print(f"Fetched {len(all_items)} total direct MP4 items.")
-    
     os.makedirs(base_dir, exist_ok=True)
 
-    # 1. PHASE 1: FIRST UPLOAD AND DELETE ALL PRE-EXISTING DOWNLOADED FILES
+    # 1. PHASE 1: UPLOAD AND DELETE ALL EXISTING DOWNLOADED FILES FIRST
     print("\n==========================================")
-    print("PHASE 1: UPLOADING AND DELETING ALL PRE-EXISTING FILES FIRST")
+    print("PHASE 1: UPLOADING AND DELETING ALL PRE-EXISTING LOCAL FILES FIRST")
     print("==========================================")
+    existing_files_found = False
     for root, dirs, files in os.walk(base_dir):
         for fname in sorted(files):
             if fname.endswith(".mp4") and not fname.endswith(".raw.mp4"):
                 local_filepath = os.path.join(root, fname)
                 if os.path.getsize(local_filepath) > 1000000:
+                    existing_files_found = True
                     folder_name = os.path.basename(root)
                     print(f"\n[FOUND LOCAL FILE] {fname} in '{folder_name}'")
                     if do_upload:
@@ -144,13 +153,18 @@ def process_pipeline():
                         else:
                             print(f"[UPLOAD WARNING] Failed to upload {fname}")
 
-    # PHASE 2: CONCURRENT DOWNLOAD -> UPLOAD PIPELINE FOR REMAINING FILES
+    if not existing_files_found:
+        print("No pre-existing local files to upload. Moving directly to Phase 2.")
+
+    # 2. PHASE 2: STREAM PIPELINE WITH INFINITE RETRY FOR FAILED DOWNLOADS
     print("\n==========================================")
     print("PHASE 2: PRODUCER-CONSUMER CONCURRENT STREAMING PIPELINE")
     print("==========================================")
 
     download_queue = queue.Queue()
     upload_queue = queue.Queue()
+    failed_items = []
+    failed_lock = threading.Lock()
 
     for w in week_order:
         if w not in WEEK_FOLDERS:
@@ -187,7 +201,9 @@ def process_pipeline():
                     if do_upload:
                         upload_queue.put((output_file, folder_name))
                 else:
-                    print(f"[DOWNLOAD FAILED] #{item['idx']:02d} [{item['filename']}] after retries.")
+                    print(f"[DOWNLOAD FAILED] #{item['idx']:02d} [{item['filename']}] - queued for retry pass.")
+                    with failed_lock:
+                        failed_items.append((item, output_file, folder_name))
             
             with active_downloads_lock:
                 active_downloads_count -= 1
@@ -234,6 +250,20 @@ def process_pipeline():
 
     download_queue.join()
     upload_queue.join()
+
+    # 3. PHASE 3: RETRY FAILED DOWNLOADS AT THE END
+    if failed_items:
+        print("\n==========================================")
+        print(f"PHASE 3: RETRYING {len(failed_items)} FAILED DOWNLOADS")
+        print("==========================================")
+        for item, output_file, folder_name in failed_items:
+            print(f"\n--> Retrying #{item['idx']:02d} [{item['filename']}]")
+            success = download_file(item['mp4_url'], output_file, retries=10)
+            if success and do_upload:
+                upload_success = upload_single_file(output_file, folder_name, gdrive_root)
+                if upload_success and delete_after_upload and os.path.exists(output_file):
+                    os.remove(output_file)
+
     print("\n[COMPLETE] All downloads and uploads finished successfully!")
 
 if __name__ == '__main__':
