@@ -1,7 +1,10 @@
-# History Log
+# History
 
-## [2026-08-23T21:10:45+05:30]
-- Initialized repository and setup pipeline for NPTEL video downloading & uploading.
-- Configured standardized naming logic: `Lecture X` -> `LX`, `Tutorial Y` -> `TY`.
-- Execution sequence: Week 3 -> Week 12, then Week 1 -> Week 2.
-- Configured automatic `rclone` upload to Google Drive after each week's download completion.
+## 2026-08-24T15:17:00+05:30 - Accurate File Numbering & Public GitHub Setup
+- **User Request**: Fix inaccurate file numbering, correct weekly folder organization, start download, make GitHub repository public, and provide single-line copy-paste command for Cloud Shell.
+- **Problem**: Files were missing zero-padded prefix numbers (e.g. `01 - Lecture 1 - ...`) causing unsorted playlist listing. `config.ini` missing for user-configured storage directories.
+- **Fix & Implementation**:
+  1. Updated `download_and_upload.py` and `downloader.py` to format filenames with accurate zero-padded indices (`01` to `75`).
+  2. Added `config.ini` support for base storage directory, upload flags, and week processing order.
+  3. Initialized git repository, committed all files, and published public repository to GitHub (`skc-coder/nptel-downloader`).
+  4. Launched the download process in the background.

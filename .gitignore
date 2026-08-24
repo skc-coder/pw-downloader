@@ -1,0 +1,5 @@
+*.part
+*.raw.mp4
+__pycache__/
+downloads/
+config.ini

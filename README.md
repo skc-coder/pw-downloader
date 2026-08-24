@@ -1,25 +1,47 @@
-# NPTEL Modern C++ Video Downloader & Google Drive Uploader
+# NPTEL Modern C++ Downloader & Uploader
 
-Automated tool to download NPTEL Modern C++ video course, rename to standardized formats (`L<N>-title` / `T<N>-title`), categorize into week folders, and upload to Google Drive using `rclone`.
-
-## Order of Execution
-Processes Week 3 to Week 12 first, followed by Week 1 to Week 2 as requested.
+A resumable, automated pipeline for downloading Digimat NPTEL Modern C++ course lectures with zero-padded file numbering, volume boosting (ffmpeg +6dB / 2.0x), weekly folder organization, and rclone Google Drive auto-syncing.
 
 ## Setup & Installation
+
 ```bash
-git clone <repo-url>
-cd "nptel downloader"
-uv venv
-source .venv/bin/activate
-uv pip install yt-dlp beautifulsoup4
+git clone https://github.com/skc-coder/nptel-downloader.git
+cd nptel-downloader
+python3 -m venv venv
+source venv/bin/activate
+pip install beautifulsoup4
+```
+
+## Configuration
+
+Edit `config.ini` to set local paths, Google Drive targets, and week download order:
+
+```ini
+[GENERAL]
+base_storage_dir = /mnt/storage/nptel_downloads
+gdrive_remote_root = gdrive:NPTEL Modern C++
+upload_to_gdrive = true
+
+[PIPELINE]
+week_order = 3,4,5,6,7,8,9,10,11,12,1,2
 ```
 
 ## Running the Code
+
 ```bash
-python download_and_upload.py
+python3 download_and_upload.py
+```
+
+## Cloud Shell Quick Run Command
+
+Run this single command on Google Cloud Shell to clone, setup, and start downloading:
+
+```bash
+git clone https://github.com/skc-coder/nptel-downloader.git && cd nptel-downloader && python3 -m venv venv && source venv/bin/activate && pip install beautifulsoup4 && python3 download_and_upload.py
 ```
 
 ## Update & Run
+
 ```bash
-git pull && python download_and_upload.py
+git pull && python3 download_and_upload.py
 ```

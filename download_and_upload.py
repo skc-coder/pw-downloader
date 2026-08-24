@@ -4,8 +4,11 @@ import sys
 import time
 import subprocess
 import urllib.request
+import configparser
 from bs4 import BeautifulSoup
 
+# Define folders mapping matching Digimat 75-lecture curriculum structure:
+# Weeks 1 to 11 have 6 lectures each (75 - 66 = 9 for Week 12).
 WEEK_FOLDERS = {
     1: "Week1: Programming in C++ is Fun.",
     2: "Week2: C++ as Better C.",
@@ -21,11 +24,12 @@ WEEK_FOLDERS = {
     12: "Week12: Move, Rvalue and STL Containers."
 }
 
-# Target execution order: Weeks 3 through 12 first, then Weeks 1 and 2
-WEEK_ORDER = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2]
-
-GDRIVE_REMOTE_ROOT = "gdrive:NPTEL Modern C++"
-BASE_STORAGE_DIR = "/mnt/storage/nptel_downloads"
+def load_config():
+    config = configparser.ConfigParser()
+    config_file = os.path.join(os.path.dirname(__file__), "config.ini")
+    if os.path.exists(config_file):
+        config.read(config_file)
+    return config
 
 def get_week_number(item_idx):
     if item_idx <= 66:
@@ -34,31 +38,21 @@ def get_week_number(item_idx):
         return 12
 
 def parse_title(raw_title):
-    tut_match = re.search(r'Tutorial\s*(\d+)\s*:\s*(.*)', raw_title, re.IGNORECASE)
-    if tut_match:
-        tut_num = tut_match.group(1)
-        rest = tut_match.group(2).strip()
-        clean_name = f"T{tut_num} - {rest}"
-    else:
-        lec_match = re.search(r'Lecture\s*(\d+)\s*-\s*(.*)', raw_title, re.IGNORECASE)
-        if lec_match:
-            lec_num = lec_match.group(1)
-            rest = lec_match.group(2).strip()
-            clean_name = f"L{lec_num} - {rest}"
-        else:
-            clean_name = raw_title.strip()
-    
+    # Standardize titles for filenames
+    # Clean up slashes, colons, duplicate hyphens and spaces
+    clean_name = raw_title.strip()
     clean_name = clean_name.replace('/', '-').replace(':', '-')
     clean_name = re.sub(r'\s+', ' ', clean_name)
     clean_name = re.sub(r'-\s*-', '-', clean_name).strip()
     return clean_name
 
-def fetch_titles_from_main_html():
+def fetch_playlist_items():
     base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
     req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
     html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
     soup = BeautifulSoup(html, 'html.parser')
     
+    # Map item index to cleaned title
     title_map = {}
     idx = 1
     for a in soup.find_all('a'):
@@ -67,15 +61,7 @@ def fetch_titles_from_main_html():
         if href.endswith('.html') and href.startswith('L'):
             title_map[idx] = parse_title(text)
             idx += 1
-    return title_map
-
-def fetch_direct_mp4_playlist():
-    base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
-    req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
-    html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
-    soup = BeautifulSoup(html, 'html.parser')
-    
-    title_map = fetch_titles_from_main_html()
+            
     items = []
     video_tags = soup.find_all('video')
     
@@ -83,12 +69,16 @@ def fetch_direct_mp4_playlist():
         source = v.find('source')
         mp4_url = source.get('src') if source else None
         
-        standard_title = title_map.get(idx, f"L{idx} - Lecture {idx}")
+        raw_title = title_map.get(idx, f"Lecture {idx}")
         week_num = get_week_number(idx)
+
+        # Accurate 2-digit zero-padded index (01 to 75)
+        formatted_filename = f"{idx:02d} - {raw_title}.mp4"
         
         items.append({
             'idx': idx,
-            'title': standard_title,
+            'title': raw_title,
+            'filename': formatted_filename,
             'mp4_url': mp4_url,
             'week_num': week_num,
             'week_folder': WEEK_FOLDERS[week_num]
@@ -98,11 +88,11 @@ def fetch_direct_mp4_playlist():
 
 def download_and_boost_volume(url, final_output_path):
     temp_raw_path = final_output_path + ".raw.mp4"
-    print(f"Downloading direct MP4 to temp location: {url}")
+    print(f"Downloading direct MP4: {url}")
     cmd_curl = ["curl", "-L", "-C", "-", "-o", temp_raw_path, url]
     res = subprocess.run(cmd_curl)
     if res.returncode != 0:
-        print("[ERROR] Failed to download MP4 via curl.")
+        print(f"[ERROR] Failed to download MP4 for {final_output_path}")
         return False
     
     print(f"Boosting volume (2.0x / +6dB) via ffmpeg...")
@@ -120,14 +110,14 @@ def download_and_boost_volume(url, final_output_path):
             os.remove(temp_raw_path)
         return True
     else:
-        print("[WARNING] ffmpeg volume boost failed, falling back to original audio video file...")
+        print("[WARNING] ffmpeg volume boost failed, keeping original audio/video file...")
         if os.path.exists(temp_raw_path):
             os.rename(temp_raw_path, final_output_path)
             return True
         return False
 
-def upload_week_to_gdrive(local_week_dir, remote_folder_name):
-    remote_target = f"{GDRIVE_REMOTE_ROOT}/{remote_folder_name}"
+def upload_week_to_gdrive(local_week_dir, remote_folder_name, gdrive_remote_root):
+    remote_target = f"{gdrive_remote_root}/{remote_folder_name}"
     print(f"\n==========================================")
     print(f"Uploading {local_week_dir} -> {remote_target}")
     print(f"==========================================")
@@ -142,14 +132,24 @@ def upload_week_to_gdrive(local_week_dir, remote_folder_name):
     return res.returncode == 0
 
 def process_pipeline():
-    all_items = fetch_direct_mp4_playlist()
+    config = load_config()
+    base_dir = config.get("GENERAL", "base_storage_dir", fallback="./downloads")
+    gdrive_root = config.get("GENERAL", "gdrive_remote_root", fallback="gdrive:NPTEL Modern C++")
+    do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=False)
+    
+    raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
+    week_order = [int(w.strip()) for w in raw_week_order.split(",") if w.strip().isdigit()]
+
+    all_items = fetch_playlist_items()
     print(f"Fetched {len(all_items)} total direct MP4 items.")
     
-    os.makedirs(BASE_STORAGE_DIR, exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
     
-    for w in WEEK_ORDER:
+    for w in week_order:
+        if w not in WEEK_FOLDERS:
+            continue
         folder_name = WEEK_FOLDERS[w]
-        local_week_dir = os.path.join(BASE_STORAGE_DIR, folder_name)
+        local_week_dir = os.path.join(base_dir, folder_name)
         os.makedirs(local_week_dir, exist_ok=True)
         
         week_items = [item for item in all_items if item['week_num'] == w]
@@ -158,24 +158,25 @@ def process_pipeline():
         print(f"==========================================")
         
         for item in week_items:
-            output_file = os.path.join(local_week_dir, f"{item['title']}.mp4")
+            output_file = os.path.join(local_week_dir, item['filename'])
             if os.path.exists(output_file) and os.path.getsize(output_file) > 1000000:
-                print(f"[EXISTS] {output_file} already downloaded and volume boosted. Skipping.")
+                print(f"[EXISTS] {item['filename']} already processed. Skipping.")
                 continue
             
             mp4_url = item['mp4_url']
             if not mp4_url:
-                print(f"[ERROR] Could not extract direct MP4 URL for #{item['idx']}: {item['title']}")
+                print(f"[ERROR] Could not extract direct MP4 URL for #{item['idx']}: {item['filename']}")
                 continue
             
-            print(f"\n--> Downloading & Boosting Volume for #{item['idx']} [{item['title']}]")
+            print(f"\n--> Processing #{item['idx']:02d} [{item['filename']}]")
             download_and_boost_volume(mp4_url, output_file)
         
-        upload_success = upload_week_to_gdrive(local_week_dir, folder_name)
-        if upload_success:
-            print(f"[SUCCESS] Week {w} fully uploaded to Google Drive!")
-        else:
-            print(f"[WARNING] Week {w} upload encountered issues.")
+        if do_upload:
+            upload_success = upload_week_to_gdrive(local_week_dir, folder_name, gdrive_root)
+            if upload_success:
+                print(f"[SUCCESS] Week {w} fully uploaded to Google Drive!")
+            else:
+                print(f"[WARNING] Week {w} upload encountered issues.")
 
 if __name__ == '__main__':
     process_pipeline()
