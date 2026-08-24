@@ -49,7 +49,7 @@ def fetch_playlist_items():
     base_url = "http://www.digimat.in/nptel/courses/video/106105234/106105234.html"
     req = urllib.request.Request(base_url, headers={'User-Agent': 'Mozilla/5.0'})
     html = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, 'parser' if False else 'html.parser')
     
     title_map = {}
     idx = 1
@@ -82,14 +82,14 @@ def fetch_playlist_items():
         
     return items
 
-def download_file(url, target_path, retries=3):
+def download_file(url, target_path, retries=5):
     for attempt in range(1, retries + 1):
-        print(f"[DOWNLOADING] {os.path.basename(target_path)} (Attempt {attempt})")
-        cmd_curl = ["curl", "-s", "-L", "-C", "-", "--retry", "3", "--retry-delay", "2", "-o", target_path, url]
+        print(f"[DOWNLOADING] {os.path.basename(target_path)} (Attempt {attempt}/{retries})")
+        cmd_curl = ["curl", "-s", "-L", "-C", "-", "--retry", "5", "--retry-delay", "2", "-o", target_path, url]
         res = subprocess.run(cmd_curl)
         if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 1000000:
             return True
-        time.sleep(1)
+        time.sleep(2)
     return False
 
 def upload_single_file(local_path, remote_week_folder, gdrive_remote_root):
@@ -112,7 +112,7 @@ def process_pipeline():
     do_upload = config.getboolean("GENERAL", "upload_to_gdrive", fallback=True)
     delete_after_upload = config.getboolean("GENERAL", "delete_after_upload", fallback=True)
     
-    num_download_workers = config.getint("GENERAL", "download_workers", fallback=2)
+    num_download_workers = config.getint("GENERAL", "download_workers", fallback=3)
     num_upload_workers = config.getint("GENERAL", "upload_workers", fallback=3)
     
     raw_week_order = config.get("PIPELINE", "week_order", fallback="1,2,3,4,5,6,7,8,9,10,11,12")
@@ -146,7 +146,7 @@ def process_pipeline():
 
     # PHASE 2: CONCURRENT DOWNLOAD -> UPLOAD PIPELINE FOR REMAINING FILES
     print("\n==========================================")
-    print("PHASE 2: STARTING STREAM PIPELINE FOR REMAINING FILES")
+    print("PHASE 2: PRODUCER-CONSUMER CONCURRENT STREAMING PIPELINE")
     print("==========================================")
 
     download_queue = queue.Queue()
@@ -165,13 +165,20 @@ def process_pipeline():
             if not (os.path.exists(output_file) and os.path.getsize(output_file) > 1000000):
                 download_queue.put((item, output_file, folder_name))
 
+    active_downloads_lock = threading.Lock()
+    active_downloads_count = 0
+
     def download_worker():
+        nonlocal active_downloads_count
         while True:
             try:
                 item, output_file, folder_name = download_queue.get_nowait()
             except queue.Empty:
                 break
             
+            with active_downloads_lock:
+                active_downloads_count += 1
+
             mp4_url = item['mp4_url']
             if mp4_url:
                 success = download_file(mp4_url, output_file)
@@ -181,6 +188,10 @@ def process_pipeline():
                         upload_queue.put((output_file, folder_name))
                 else:
                     print(f"[DOWNLOAD FAILED] #{item['idx']:02d} [{item['filename']}] after retries.")
+            
+            with active_downloads_lock:
+                active_downloads_count -= 1
+            
             download_queue.task_done()
 
     def upload_worker():
@@ -188,7 +199,9 @@ def process_pipeline():
             try:
                 local_filepath, folder_name = upload_queue.get(timeout=3)
             except queue.Empty:
-                if download_queue.empty() and active_downloads == 0:
+                with active_downloads_lock:
+                    is_active = active_downloads_count > 0
+                if download_queue.empty() and not is_active:
                     break
                 continue
             
@@ -216,12 +229,8 @@ def process_pipeline():
         t.start()
         download_threads.append(t)
 
-    global active_downloads
-    active_downloads = len(download_threads)
-
     for t in download_threads:
         t.join()
-        active_downloads -= 1
 
     download_queue.join()
     upload_queue.join()
