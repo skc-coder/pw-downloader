@@ -86,40 +86,14 @@ def fetch_playlist_items():
         
     return items
 
-def download_and_boost_volume(url, final_output_path):
-    temp_raw_path = final_output_path + ".raw.mp4"
+def download_video(url, final_output_path):
     print(f"Downloading direct MP4: {url}")
-    cmd_curl = ["curl", "-L", "-C", "-", "-o", temp_raw_path, url]
+    cmd_curl = ["curl", "-L", "-C", "-", "-o", final_output_path, url]
     res = subprocess.run(cmd_curl)
-    if res.returncode != 0:
+    if res.returncode == 0 and os.path.exists(final_output_path):
+        return True
+    else:
         print(f"[ERROR] Failed to download MP4 for {final_output_path}")
-        return False
-    
-    print(f"Boosting volume (2.0x / +6dB) via ffmpeg...")
-    cmd_ffmpeg = [
-        "ffmpeg", "-y",
-        "-i", temp_raw_path,
-        "-c:v", "copy",
-        "-filter:a", "volume=2.0",
-        final_output_path
-    ]
-    try:
-        res_ff = subprocess.run(cmd_ffmpeg)
-        if res_ff.returncode == 0 and os.path.exists(final_output_path):
-            if os.path.exists(temp_raw_path):
-                os.remove(temp_raw_path)
-            return True
-        else:
-            print("[WARNING] ffmpeg volume boost failed, keeping original audio/video file...")
-            if os.path.exists(temp_raw_path):
-                os.rename(temp_raw_path, final_output_path)
-                return True
-            return False
-    except FileNotFoundError:
-        print("[WARNING] ffmpeg binary not found on system path! Keeping original audio/video file without volume boost...")
-        if os.path.exists(temp_raw_path):
-            os.rename(temp_raw_path, final_output_path)
-            return True
         return False
 
 def upload_week_to_gdrive(local_week_dir, remote_folder_name, gdrive_remote_root):
@@ -175,7 +149,7 @@ def process_pipeline():
                 continue
             
             print(f"\n--> Processing #{item['idx']:02d} [{item['filename']}]")
-            download_and_boost_volume(mp4_url, output_file)
+            download_video(mp4_url, output_file)
         
         if do_upload:
             upload_success = upload_week_to_gdrive(local_week_dir, folder_name, gdrive_root)
