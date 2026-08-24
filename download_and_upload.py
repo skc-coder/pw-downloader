@@ -100,6 +100,9 @@ def download_file(url, target_path, retries=5):
     return False
 
 def upload_single_file(local_path, remote_week_folder, gdrive_remote_root):
+    if not shutil.which("rclone"):
+        print("[ERROR] 'rclone' executable is not installed or not found on PATH!")
+        return False
     remote_target = f"{gdrive_remote_root}/{remote_week_folder}"
     print(f"[UPLOADING] {os.path.basename(local_path)} -> {remote_target}")
     cmd = [
