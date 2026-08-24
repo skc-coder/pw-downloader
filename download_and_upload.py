@@ -93,8 +93,11 @@ def upload_single_file(local_path, remote_week_folder, gdrive_remote_root):
         "rclone", "copy",
         local_path,
         remote_target,
+        "--drive-chunk-size", "64M",
+        "--transfers", "4",
+        "--drive-acknowledge-abuse",
         "--progress",
-        "--stats", "5s"
+        "--stats", "2s"
     ]
     res = subprocess.run(cmd)
     return res.returncode == 0
